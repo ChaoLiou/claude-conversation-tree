@@ -13,14 +13,14 @@ function must<T>(r: Result<T>): T {
 function noCallbacks(): import('../src/ui/panel.js').PanelCallbacks {
   return {
     onJump: () => {},
-    onBranch: () => {},
-    onClearPending: () => {},
     onStartLink: () => {},
     onPickParent: () => {},
     onMakeRoot: () => {},
     onCancelLink: () => {},
-    onToggleFilter: () => {},
+    onSetFilter: () => {},
     onLoadOlder: () => {},
+    onUndo: () => {},
+    onDismissNudge: () => {},
     onToggle: () => {},
   };
 }
@@ -31,8 +31,17 @@ function viewExtras(): {
   onlyLinked: boolean;
   totalCount: number;
   linkedCount: number;
+  undo: null;
+  nudge: null;
 } {
-  return { linkingChildId: null, onlyLinked: false, totalCount: 0, linkedCount: 0 };
+  return {
+    linkingChildId: null,
+    onlyLinked: false,
+    totalCount: 0,
+    linkedCount: 0,
+    undo: null,
+    nudge: null,
+  };
 }
 
 /** Read the indent the panel drew, the way the verify script reads it. */
@@ -60,7 +69,6 @@ function mountWith(pairs: ReadonlyArray<readonly [string, string | null]>): void
   panel.mount(document.body);
   panel.render({
     rows: linearize(state),
-    pendingParentId: null,
     activeTurnId: null,
     notice: null,
     coverage: null,
@@ -120,7 +128,7 @@ describe('the columns the panel draws', () => {
       ...noCallbacks(),
     });
     panel.mount(document.body);
-    panel.render({ rows: linearize(state), pendingParentId: null, activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
+    panel.render({ rows: linearize(state), activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
     const root = document.getElementById('claude-tree-panel-host')?.shadowRoot;
     expect(root?.querySelectorAll('img').length).toBe(0);
     expect(root?.querySelector('.panel .jump .text')?.textContent).toBe('<img src=x onerror=alert(1)>');
@@ -140,61 +148,148 @@ describe('the strips that the panel can hide', () => {
     return root;
   }
 
-  it('marks the choice strip hidden when nothing is chosen', () => {
-    const root = mountPanel({ rows: [], pendingParentId: null, activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
-    const pending = root.querySelector('.panel .pending') as HTMLElement;
-    expect(pending.hidden).toBe(true);
-    // The stylesheet sets `display: flex` on this strip, which beats the
+  it('marks every strip hidden when there is nothing to say', () => {
+    const root = mountPanel({ rows: [], activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
+    for (const name of ['.linking', '.nudge', '.undo', '.notice']) {
+      expect((root.querySelector(`.panel ${name}`) as HTMLElement).hidden).toBe(true);
+    }
+    // The stylesheet sets `display: flex` on each strip, which beats the
     // browser's own rule for the hidden attribute. The stylesheet must say
-    // so again, or a cancelled choice keeps showing.
+    // so again, or a strip that is over keeps showing.
     const style = root.querySelector('style')?.textContent ?? '';
-    expect(style).toContain('.pending[hidden]');
-    expect(style).toContain('.notice[hidden]');
+    for (const name of ['.linking[hidden]', '.nudge[hidden]', '.undo[hidden]', '.notice[hidden]']) {
+      expect(style).toContain(name);
+    }
   });
 
   it('marks the notice strip hidden when there is no notice', () => {
-    const root = mountPanel({ rows: [], pendingParentId: null, activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
+    const root = mountPanel({ rows: [], activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
     expect((root.querySelector('.panel .notice') as HTMLElement).hidden).toBe(true);
   });
 
   it('shows the notice strip when there is a notice', () => {
-    const root = mountPanel({ rows: [], pendingParentId: null, activeTurnId: null, notice: 'something happened', coverage: null, ...viewExtras() });
+    const root = mountPanel({ rows: [], activeTurnId: null, notice: 'something happened', coverage: null, ...viewExtras() });
     const notice = root.querySelector('.panel .notice') as HTMLElement;
     expect(notice.hidden).toBe(false);
     expect(notice.querySelector('.noticetext')?.textContent).toBe('something happened');
   });
 
-  it('shows the choice strip, with the label, when a node is chosen', () => {
+  it('names the new exchange in the note, and offers the link for it', () => {
     let state = createTree('c1', 1);
-    state = must(addNode(state, { id: 'q1', label: 'the chosen question' }, null, 2));
-    const root = mountPanel({
-      rows: linearize(state), pendingParentId: 'q1', activeTurnId: null, notice: null,
-      coverage: null,
-      ...viewExtras(),
+    state = must(addNode(state, { id: 'q1', label: 'the new question' }, null, 2));
+    let started: string | null = null;
+    document.body.innerHTML = '';
+    const panel = new TreePanel({
+      ...noCallbacks(),
+      onStartLink: (id) => { started = id; },
     });
-    const pending = root.querySelector('.panel .pending') as HTMLElement;
-    expect(pending.hidden).toBe(false);
-    expect(pending.querySelector('.label')?.textContent).toBe('the chosen question');
+    panel.mount(document.body);
+    panel.render({
+      rows: linearize(state), activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+      nudge: { turnId: 'q1', label: 'the new question' },
+    });
+    const root = document.getElementById('claude-tree-panel-host')!.shadowRoot!;
+    const nudge = root.querySelector('.panel .nudge') as HTMLElement;
+    expect(nudge.hidden).toBe(false);
+    expect(nudge.querySelector('.label')?.textContent).toBe('the new question');
+    (nudge.querySelector('.nudgelink') as HTMLButtonElement).click();
+    expect(started).toBe('q1');
+  });
+
+  it('says where the exchange went, and offers the undo', () => {
+    let undone = 0;
+    document.body.innerHTML = '';
+    const panel = new TreePanel({ ...noCallbacks(), onUndo: () => { undone++; } });
+    panel.mount(document.body);
+    panel.render({
+      rows: [], activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+      undo: { childLabel: 'the child', parentLabel: 'the parent' },
+    });
+    const root = document.getElementById('claude-tree-panel-host')!.shadowRoot!;
+    const undo = root.querySelector('.panel .undo') as HTMLElement;
+    expect(undo.hidden).toBe(false);
+    expect(undo.querySelector('.undotext')?.textContent).toBe('now under the parent');
+    (undo.querySelector('.undobtn') as HTMLButtonElement).click();
+    expect(undone).toBe(1);
+  });
+
+  it('says so when the undo would put back a root', () => {
+    const root = mountPanel({
+      rows: [], activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+      undo: { childLabel: 'the child', parentLabel: null },
+    });
+    expect(root.querySelector('.panel .undotext')?.textContent)
+      .toBe('the child: no parent now');
+  });
+
+  it('hides the note and the undo while a link is open', () => {
+    const root = mountPanel({
+      rows: [], activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+      linkingChildId: 'b',
+      undo: { childLabel: 'the child', parentLabel: 'the parent' },
+      nudge: { turnId: 'q1', label: 'the new question' },
+    });
+    // The pick bar owns the panel. A second offer under it would name an
+    // action that the pick state cannot carry out.
+    expect((root.querySelector('.panel .nudge') as HTMLElement).hidden).toBe(true);
+    expect((root.querySelector('.panel .undo') as HTMLElement).hidden).toBe(true);
+    expect((root.querySelector('.panel .linking') as HTMLElement).hidden).toBe(false);
+  });
+});
+
+describe('the filter says which exchanges the list shows', () => {
+  function mountFilter(onlyLinked: boolean, onSetFilter: (v: boolean) => void): ShadowRoot {
+    document.body.innerHTML = '';
+    const panel = new TreePanel({ ...noCallbacks(), onSetFilter });
+    panel.mount(document.body);
+    panel.render({
+      rows: [], activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+      onlyLinked,
+    });
+    return document.getElementById('claude-tree-panel-host')!.shadowRoot!;
+  }
+
+  it('fills the segment that the list follows now', () => {
+    const all = mountFilter(false, () => {});
+    expect(all.querySelector('.seg-b.all')?.classList.contains('on')).toBe(true);
+    expect(all.querySelector('.seg-b.only')?.classList.contains('on')).toBe(false);
+    const only = mountFilter(true, () => {});
+    expect(only.querySelector('.seg-b.all')?.classList.contains('on')).toBe(false);
+    expect(only.querySelector('.seg-b.only')?.classList.contains('on')).toBe(true);
+  });
+
+  it('asks for the state each segment names, not for the other one', () => {
+    const asked: boolean[] = [];
+    const root = mountFilter(false, (v) => { asked.push(v); });
+    (root.querySelector('.seg-b.only') as HTMLButtonElement).click();
+    (root.querySelector('.seg-b.all') as HTMLButtonElement).click();
+    expect(asked).toEqual([true, false]);
   });
 });
 
 describe('class names must not collide', () => {
-  it('the floating button and the choice strip use different classes', () => {
+  it('each strip has exactly one element', () => {
     document.body.innerHTML = '';
     let state = createTree('c1', 1);
-    state = must(addNode(state, { id: 'q1', label: 'chosen one' }, null, 2));
-    const panel = new TreePanel({
-      ...noCallbacks(),
-    });
+    state = must(addNode(state, { id: 'q1', label: 'one' }, null, 2));
+    const panel = new TreePanel({ ...noCallbacks() });
     panel.mount(document.body);
-    panel.render({ rows: linearize(state), pendingParentId: 'q1', activeTurnId: null, notice: null, coverage: null, ...viewExtras() });
+    panel.render({
+      rows: linearize(state), activeTurnId: null, notice: null, coverage: null,
+      ...viewExtras(),
+    });
     const root = document.getElementById('claude-tree-panel-host')!.shadowRoot!;
 
-    // Exactly one element may answer to `.pending`, or every reader of the
+    // Exactly one element may answer to each strip name, or a reader of the
     // panel, including the verify script, picks up the wrong element.
-    expect(root.querySelectorAll('.pending')).toHaveLength(1);
-    expect((root.querySelector('.pending') as HTMLElement).className).toBe('pending');
-    expect(root.querySelector('.toggle')?.classList.contains('choosing')).toBe(true);
+    for (const name of ['.linking', '.nudge', '.undo', '.notice']) {
+      expect(root.querySelectorAll(name)).toHaveLength(1);
+    }
   });
 });
 
@@ -212,8 +307,9 @@ describe('the strip that says the tree may be short', () => {
   }
 
   const base = {
-    rows: [], pendingParentId: null, activeTurnId: null, notice: null,
+    rows: [], activeTurnId: null, notice: null,
     linkingChildId: null, onlyLinked: false, totalCount: 0, linkedCount: 0,
+    undo: null, nudge: null,
   };
 
   it('warns while older messages may still exist', () => {
@@ -333,15 +429,33 @@ describe('linking an exchange after the event', () => {
   }
 
   const base = {
-    pendingParentId: null, activeTurnId: null, notice: null, coverage: null,
+    activeTurnId: null, notice: null, coverage: null,
     onlyLinked: false, totalCount: 3, linkedCount: 0,
+    undo: null, nudge: null,
   };
 
-  it('offers link on a node with no parent, and relink on one with a parent', () => {
+  it('puts one action on every row, and says the same word on each', () => {
     const state = treeOf([['a', null], ['b', 'a']]);
     const root = mount({ ...base, rows: linearize(state), linkingChildId: null });
-    const labels = Array.from(root.querySelectorAll('.panel .row .link')).map((b) => b.textContent);
-    expect(labels).toEqual(['link', 'relink']);
+    const rows = Array.from(root.querySelectorAll<HTMLElement>('.panel .row'));
+    // One action per row, and it runs one way: the button asks for the
+    // parent of the row it sits on. A second button that ran the other way
+    // made the direction a guess.
+    for (const row of rows) {
+      expect(row.querySelectorAll('.act')).toHaveLength(1);
+    }
+    const labels = rows.map((row) => row.querySelector('.act')?.textContent);
+    expect(labels).toEqual(['set parent\u2026', 'set parent\u2026']);
+  });
+
+  it('keeps the action visible without a hover', () => {
+    const state = treeOf([['a', null], ['b', null]]);
+    const root = mount({ ...base, rows: linearize(state), linkingChildId: null });
+    // An action that appears on hover only is an action a new reader never
+    // finds, and a touch screen has no hover at all.
+    const style = root.querySelector('style')?.textContent ?? '';
+    expect(style).not.toContain('opacity: 0;');
+    expect(style).not.toContain('.row:hover .act');
   });
 
   it('asks for a parent once a link is open', () => {
@@ -368,7 +482,7 @@ describe('linking an exchange after the event', () => {
       { ...base, rows: linearize(state), linkingChildId: 'b' },
       { onPickParent: (id) => { picked = id; } },
     );
-    (root.querySelector('.panel .row[data-turn="a"] .branch') as HTMLButtonElement).click();
+    (root.querySelector('.panel .row[data-turn="a"] .act.pick') as HTMLButtonElement).click();
     expect(picked).toBe('a');
   });
 
@@ -407,6 +521,37 @@ describe('linking an exchange after the event', () => {
     expect(rooted).toBe(1);
   });
 
+  it('gives up the link when the panel closes', () => {
+    const state = treeOf([['a', null], ['b', null]]);
+    let cancelled = 0;
+    document.body.innerHTML = '';
+    const panel = new TreePanel({ ...noCallbacks(), onCancelLink: () => { cancelled++; } });
+    panel.mount(document.body);
+    panel.render({ ...base, rows: linearize(state), linkingChildId: 'b' });
+    // A pick state you cannot see is a pick state you forget.
+    panel.setOpen(false);
+    expect(cancelled).toBe(1);
+  });
+
+  it('gives up the link on Escape, and leaves Escape alone otherwise', () => {
+    const state = treeOf([['a', null], ['b', null]]);
+    let cancelled = 0;
+    document.body.innerHTML = '';
+    const panel = new TreePanel({ ...noCallbacks(), onCancelLink: () => { cancelled++; } });
+    panel.mount(document.body);
+
+    panel.render({ ...base, rows: linearize(state), linkingChildId: null });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    // claude.ai uses Escape for its own ends, so take the key only while
+    // the pick state is really open.
+    expect(cancelled).toBe(0);
+
+    panel.render({ ...base, rows: linearize(state), linkingChildId: 'b' });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(cancelled).toBe(1);
+    panel.unmount();
+  });
+
   it('lets you give up on the link', () => {
     const state = treeOf([['a', null], ['b', null]]);
     let cancelled = 0;
@@ -431,30 +576,34 @@ describe('the filter that hides what stands alone', () => {
   }
 
   const base = {
-    rows: [], pendingParentId: null, activeTurnId: null, notice: null,
+    rows: [], activeTurnId: null, notice: null,
     coverage: null, linkingChildId: null,
+    undo: null, nudge: null,
   };
 
   it('counts every exchange while it shows them all', () => {
     const root = mount({ ...base, onlyLinked: false, totalCount: 12, linkedCount: 4 });
     expect(root.querySelector('.panel .meta')?.textContent).toBe('12 exchanges');
-    expect(root.querySelector('.panel .filter')?.textContent).toBe('all');
+    expect(root.querySelector('.panel .seg-b.all')?.classList.contains('on')).toBe(true);
   });
 
   it('counts the linked ones while it hides the rest', () => {
     const root = mount({ ...base, onlyLinked: true, totalCount: 12, linkedCount: 4 });
     expect(root.querySelector('.panel .meta')?.textContent).toBe('4 of 12');
-    expect(root.querySelector('.panel .filter')?.textContent).toBe('linked');
+    expect(root.querySelector('.panel .seg-b.only')?.classList.contains('on')).toBe(true);
   });
 
-  it('reports a press of the filter', () => {
-    let pressed = 0;
+  it('does not ask again for the state the list already shows', () => {
+    const asked: boolean[] = [];
     const root = mount(
       { ...base, onlyLinked: false, totalCount: 0, linkedCount: 0 },
-      { onToggleFilter: () => { pressed++; } },
+      { onSetFilter: (v) => { asked.push(v); } },
     );
-    (root.querySelector('.panel .filter') as HTMLButtonElement).click();
-    expect(pressed).toBe(1);
+    (root.querySelector('.panel .seg-b.all') as HTMLButtonElement).click();
+    (root.querySelector('.panel .seg-b.only') as HTMLButtonElement).click();
+    // Each segment names a state, not a change. Pressing the filled one
+    // asks for the state it already shows, and the session ignores that.
+    expect(asked).toEqual([false, true]);
   });
 
   it('explains an empty filtered view differently', () => {

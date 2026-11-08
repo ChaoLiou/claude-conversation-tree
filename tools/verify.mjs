@@ -60,7 +60,7 @@ const READ_PANEL = `(() => {
       isRoot: row.dataset.root === 'true',
       label: jump === null ? '' : jump.textContent,
       kids: kids === null ? '' : kids.textContent,
-      chosen: row.classList.contains('chosen'),
+      target: row.classList.contains('target'),
       active: row.classList.contains('active'),
     };
   });
@@ -73,11 +73,15 @@ const READ_PANEL = `(() => {
       const l = root.querySelector('.panel .linking');
       return l !== null && getComputedStyle(l).display !== 'none';
     })(),
-    pendingVisible: (() => {
-      const p = root.querySelector('.panel .pending');
-      // Read what the browser really draws. The hidden attribute alone lies
-      // when a stylesheet sets display on the element.
-      return p !== null && getComputedStyle(p).display !== 'none';
+    // Read what the browser really draws. The hidden attribute alone lies
+    // when a stylesheet sets display on the element.
+    nudgeVisible: (() => {
+      const n = root.querySelector('.panel .nudge');
+      return n !== null && getComputedStyle(n).display !== 'none';
+    })(),
+    undoVisible: (() => {
+      const u = root.querySelector('.panel .undo');
+      return u !== null && getComputedStyle(u).display !== 'none';
     })(),
     notice: (() => {
       const n = root.querySelector('.panel .notice');
@@ -227,67 +231,74 @@ async function main() {
     `columns: ${panel.rows.map((r) => r.columns).join(',')}`);
   await shoot(cdp, '4-two-rows-linear');
 
-  // 5. Choose the first exchange.
-  log('step 5: choose the first exchange as the parent');
-  await cdp.evaluate(`(() => {
-    const root = document.getElementById('claude-tree-panel-host').shadowRoot;
-    root.querySelectorAll('.panel .row')[0].querySelector('.branch').click();
-    return true;
-  })()`);
-  await new Promise((r) => setTimeout(r, 400));
-  panel = await readPanel(cdp);
-  check('the chosen row is marked', panel.rows[0]?.chosen === true);
-  check('the panel says where the next question goes', panel.pendingVisible === true);
-  await shoot(cdp, '5-parent-chosen');
-
-  // 6. The third question must become a sibling of the second.
-  log('step 6: ask the third question');
+  // 5. A third question. It must also stand on its own, and the panel
+  //    must offer the link for it.
+  log('step 5: ask the third question');
   await sendMessage(cdp, `${token}-3 reply with only: OK`);
   await waitSettled(cdp);
   panel = await waitPanel(cdp, (p) => p.rows.length >= 3, 'the third exchange');
   check('three exchanges give three rows', panel.rows.length === 3, `saw ${panel.rows.length}`);
-  // The tree now reads: q1 with q3 under it, and q2 on its own.
-  const byTurn = Object.fromEntries(panel.rows.map((r) => [r.label.slice(0, 12), r]));
+  check('a new exchange stands on its own', panel.rows.every((r) => r.isRoot === true),
+    `roots: ${panel.rows.map((r) => r.isRoot).join(',')}`);
+  check('the panel offers the link for the new exchange', panel.nudgeVisible === true);
+  await shoot(cdp, '5-three-roots');
+
+  // 6. Link the third question under the first, which is the only way a
+  //    link is ever made now.
+  log('step 6: put the third question under the first');
+  const startLink = (needle) => cdp.evaluate(`(() => {
+    const root = document.getElementById('claude-tree-panel-host').shadowRoot;
+    const rows = Array.from(root.querySelectorAll('.panel .row'));
+    const row = rows.find((r) => (r.textContent || '').includes(${'$'}{JSON.stringify(needle)}));
+    row.querySelector('.act.setparent').click();
+    return true;
+  })()`);
+  const pickParent = (needle) => cdp.evaluate(`(() => {
+    const root = document.getElementById('claude-tree-panel-host').shadowRoot;
+    const rows = Array.from(root.querySelectorAll('.panel .row'));
+    const row = rows.find((r) => (r.textContent || '').includes(${'$'}{JSON.stringify(needle)}));
+    row.querySelector('.act.pick').click();
+    return true;
+  })()`);
+
+  await startLink(`${token}-3`);
+  await new Promise((r) => setTimeout(r, 400));
+  panel = await readPanel(cdp);
+  check('the panel asks which parent to use', panel.linking === true);
+  check('every other row became a target',
+    panel.rows.filter((r) => r.target).length === 2,
+    `targets: ${panel.rows.filter((r) => r.target).length}`);
+  await shoot(cdp, '6-picking-a-parent');
+
+  await pickParent(`${token}-1`);
+  await new Promise((r) => setTimeout(r, 500));
+  panel = await readPanel(cdp);
   const third = panel.rows.find((r) => r.label.includes(`${token}-3`)) ?? null;
   const second = panel.rows.find((r) => r.label.includes(`${token}-2`)) ?? null;
   const first = panel.rows.find((r) => r.label.includes(`${token}-1`)) ?? null;
-  void byTurn;
   check('the third question hangs under the first', third?.depth === 1 && third?.isRoot === false,
     `depth ${third?.depth}, root ${third?.isRoot}`);
   check('the second question is still on its own', second?.isRoot === true);
   check('the first exchange reports one follow-up', String(first?.kids).includes('1'), `kids: ${first?.kids}`);
   check('the panel draws the one link', third?.columns === 0 && first?.columns === 0,
     `columns: ${panel.rows.map((r) => r.columns).join(',')}`);
-  check('the choice is spent', panel.pendingVisible === false);
+  check('the panel stopped asking', panel.linking === false);
+  check('the panel offers the undo', panel.undoVisible === true);
   await shoot(cdp, '6-branched');
 
-  // 6b. Link an exchange after the event, which is the only other way to
-  //     make a link now.
-  log('step 6b: link the second exchange under the third, after the event');
-  await cdp.evaluate(`(() => {
-    const root = document.getElementById('claude-tree-panel-host').shadowRoot;
-    const rows = Array.from(root.querySelectorAll('.panel .row'));
-    const second = rows.find((r) => (r.textContent || '').includes(${JSON.stringify(token + '-2')}));
-    second.querySelector('.link').click();
-    return true;
-  })()`);
+  // 6b. A second link, on an exchange that already has none.
+  log('step 6b: put the second question under the third');
+  await startLink(`${token}-2`);
   await new Promise((r) => setTimeout(r, 400));
   panel = await readPanel(cdp);
-  check('the panel asks which parent to use', panel.linking === true);
+  check('the panel asks again', panel.linking === true);
 
-  await cdp.evaluate(`(() => {
-    const root = document.getElementById('claude-tree-panel-host').shadowRoot;
-    const rows = Array.from(root.querySelectorAll('.panel .row'));
-    const third = rows.find((r) => (r.textContent || '').includes(${JSON.stringify(token + '-3')}));
-    third.querySelector('.branch').click();
-    return true;
-  })()`);
+  await pickParent(`${token}-3`);
   await new Promise((r) => setTimeout(r, 500));
   panel = await readPanel(cdp);
   const linked = panel.rows.find((r) => r.label.includes(`${token}-2`)) ?? null;
   check('the exchange moved under the one you picked', linked?.depth === 2,
     `depth ${linked?.depth}`);
-  check('the panel stopped asking', panel.linking === false);
   await shoot(cdp, '6b-linked-after');
 
   // 6c. Moving to another conversation must not carry these exchanges

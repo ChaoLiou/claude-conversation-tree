@@ -5,9 +5,7 @@ import {
   getRoots,
   nodeCount,
   pathToRoot,
-  removeNode,
   setParent,
-  setPendingParent,
   type Result,
   type TreeState,
 } from '../src/core/tree.js';
@@ -67,27 +65,30 @@ describe('an exchange you did not tie to anything', () => {
   });
 });
 
-describe('the exchange you chose a parent for', () => {
-  it('hangs under the node you picked', () => {
+describe('an exchange that the page just drew', () => {
+  it('stands on its own, whatever stands near it', () => {
     const now = clock();
-    let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1', 'q2'), now()).state;
-
-    state = must(setPendingParent(state, 'q1', now()));
-    const result = syncWithTranscript(state, page('q1', 'q2', 'q3'), now());
-
-    expect(result.added).toEqual(['q3']);
-    expect(pathToRoot(result.state, 'q3').map((n) => n.id)).toEqual(['q1', 'q3']);
+    const result = syncWithTranscript(createTree('c1', now()), page('q1', 'q2', 'q3'), now());
+    // Sync does nothing at all with links. It reads the page; it never
+    // works a link out, and it holds no choice for the next question.
+    expect(result.added).toEqual(['q1', 'q2', 'q3']);
+    for (const id of ['q1', 'q2', 'q3']) {
+      expect(result.state.nodes[id]?.parentId).toBeNull();
+    }
+    expect(getRoots(result.state).map((n) => n.id)).toEqual(['q1', 'q2', 'q3']);
   });
 
-  it('builds the three sibling follow-ups you wanted', () => {
+  it('builds the three sibling follow-ups you wanted, after the event', () => {
     const now = clock();
     let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1'), now()).state;
 
     const shown = ['q1'];
     for (const id of ['q2', 'q3', 'q4']) {
-      state = must(setPendingParent(state, 'q1', now()));
       shown.push(id);
+      // The question arrives first. You read the reply, and then you say
+      // which exchange it hangs under.
       state = syncWithTranscript(state, page(...shown), now()).state;
+      state = must(setParent(state, id, 'q1', now()));
     }
 
     expect(getChildren(state, 'q1').map((n) => n.id)).toEqual(['q2', 'q3', 'q4']);
@@ -96,49 +97,11 @@ describe('the exchange you chose a parent for', () => {
     }
   });
 
-  it('spends the choice on one question only', () => {
+  it('reports every new id, so the panel can offer the link for the last one', () => {
     const now = clock();
-    let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1', 'q2'), now()).state;
-    state = must(setPendingParent(state, 'q1', now()));
-
-    state = syncWithTranscript(state, page('q1', 'q2', 'q3'), now()).state;
-    expect(state.pendingParentId).toBeNull();
-
-    // The next one has no choice behind it, so it stands on its own.
-    state = syncWithTranscript(state, page('q1', 'q2', 'q3', 'q4'), now()).state;
-    expect(state.nodes['q4']?.parentId).toBeNull();
-  });
-
-  it('gives the choice to the first new exchange only', () => {
-    const now = clock();
-    let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1'), now()).state;
-    state = must(setPendingParent(state, 'q1', now()));
-
+    const state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1'), now()).state;
     const result = syncWithTranscript(state, page('q1', 'q2', 'q3'), now());
     expect(result.added).toEqual(['q2', 'q3']);
-    expect(result.state.nodes['q2']?.parentId).toBe('q1');
-    expect(result.state.nodes['q3']?.parentId).toBeNull();
-  });
-
-  it('keeps your choice while you have not asked anything yet', () => {
-    const now = clock();
-    let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1', 'q2'), now()).state;
-    state = must(setPendingParent(state, 'q1', now()));
-
-    for (let i = 0; i < 3; i++) {
-      state = syncWithTranscript(state, page('q1', 'q2'), now()).state;
-      expect(state.pendingParentId).toBe('q1');
-    }
-  });
-
-  it('ignores a choice whose node you deleted, and says so', () => {
-    const now = clock();
-    let state: TreeState = syncWithTranscript(createTree('c1', now()), page('q1', 'q2'), now()).state;
-    state = { ...must(removeNode(state, 'q1', { cascade: false }, now())), pendingParentId: 'q1' };
-
-    const result = syncWithTranscript(state, page('q2', 'q3'), now());
-    expect(result.problems.join(' ')).toContain('q1');
-    expect(result.state.nodes['q3']?.parentId).toBeNull();
   });
 });
 

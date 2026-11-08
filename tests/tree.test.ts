@@ -1,17 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   addNode,
-  addNodeUsingPendingParent,
   createTree,
   deriveLabel,
   deserialize,
-  effectiveParentId,
   getChildren,
   getRoots,
   isDescendantOf,
   isLinked,
   isEmpty,
-  lastAddedNode,
   linearize,
   nodeCount,
   pathToRoot,
@@ -20,7 +17,6 @@ import {
   serialize,
   setLabel,
   setParent,
-  setPendingParent,
   setPosition,
   subtreeIds,
   type Result,
@@ -80,22 +76,21 @@ describe('an empty tree', () => {
     expect(isEmpty(state)).toBe(true);
     expect(nodeCount(state)).toBe(0);
     expect(getRoots(state)).toEqual([]);
-    expect(lastAddedNode(state)).toBeNull();
-    expect(effectiveParentId(state)).toBeNull();
     expect(linearize(state)).toEqual([]);
   });
 });
 
-describe('the default parent', () => {
-  it('is the newest node, so a plain chat stays a straight line', () => {
+describe('a new exchange', () => {
+  it('stands on its own, because only the user makes a link', () => {
     const now = clock();
     let state = createTree('conv-1', now());
-    state = must(addNodeUsingPendingParent(state, { id: 'q1', label: 'Q1' }, now()));
-    state = must(addNodeUsingPendingParent(state, { id: 'q2', label: 'Q2' }, now()));
-    state = must(addNodeUsingPendingParent(state, { id: 'q3', label: 'Q3' }, now()));
-
-    expect(getRoots(state).map((n) => n.id)).toEqual(['q1']);
-    expect(pathToRoot(state, 'q3').map((n) => n.id)).toEqual(['q1', 'q2', 'q3']);
+    // There is no default parent and no pending choice. An exchange that
+    // arrives is a tree of one node until the user says otherwise.
+    for (const id of ['q1', 'q2', 'q3']) {
+      state = must(addNode(state, { id, label: id }, null, now()));
+    }
+    expect(getRoots(state).map((n) => n.id)).toEqual(['q1', 'q2', 'q3']);
+    expect(pathToRoot(state, 'q3').map((n) => n.id)).toEqual(['q3']);
   });
 });
 
@@ -105,12 +100,13 @@ describe('the branching case this extension exists for', () => {
     let state = createTree('conv-1', now());
 
     // The first exchange.
-    state = must(addNodeUsingPendingParent(state, { id: 'q1', label: 'the first question' }, now()));
+    state = must(addNode(state, { id: 'q1', label: 'the first question' }, null, now()));
 
-    // Three follow-ups. Each one depends on q1, not on the one before it.
+    // Three follow-ups. Each one arrives on its own, and then the user
+    // puts it under q1. Each one depends on q1, not on the one before it.
     for (const id of ['q2', 'q3', 'q4']) {
-      state = must(setPendingParent(state, 'q1', now()));
-      state = must(addNodeUsingPendingParent(state, { id, label: id }, now()));
+      state = must(addNode(state, { id, label: id }, null, now()));
+      state = must(setParent(state, id, 'q1', now()));
     }
 
     expect(getRoots(state).map((n) => n.id)).toEqual(['q1']);
@@ -123,27 +119,6 @@ describe('the branching case this extension exists for', () => {
     expect(isDescendantOf(state, 'q3', 'q1')).toBe(true);
   });
 
-  it('spends the pending choice on one question only', () => {
-    const now = clock();
-    let state = createTree('conv-1', now());
-    state = must(addNodeUsingPendingParent(state, { id: 'q1', label: 'Q1' }, now()));
-    state = must(addNodeUsingPendingParent(state, { id: 'q2', label: 'Q2' }, now()));
-
-    state = must(setPendingParent(state, 'q1', now()));
-    expect(state.pendingParentId).toBe('q1');
-
-    state = must(addNodeUsingPendingParent(state, { id: 'q3', label: 'Q3' }, now()));
-    expect(state.pendingParentId).toBeNull();
-
-    // q4 gets the default parent again, which is q3.
-    state = must(addNodeUsingPendingParent(state, { id: 'q4', label: 'Q4' }, now()));
-    expect(pathToRoot(state, 'q4').map((n) => n.id)).toEqual(['q1', 'q3', 'q4']);
-  });
-
-  it('refuses a pending parent that is not in the tree', () => {
-    const state = build([['q1', null]]);
-    expect(errorOf(setPendingParent(state, 'ghost', 2))).toBe('NODE_NOT_FOUND');
-  });
 });
 
 describe('addNode guards', () => {
@@ -241,26 +216,6 @@ describe('removeNode', () => {
     ]);
     const after = must(removeNode(state, 'q2', { cascade: true }, 99));
     expect(Object.keys(after.nodes).sort()).toEqual(['q1', 'q4']);
-  });
-
-  it('clears a pending choice that pointed at the removed node', () => {
-    let state = build([
-      ['q1', null],
-      ['q2', 'q1'],
-    ]);
-    state = must(setPendingParent(state, 'q2', 50));
-    const after = must(removeNode(state, 'q2', { cascade: true }, 99));
-    expect(after.pendingParentId).toBeNull();
-  });
-
-  it('keeps a pending choice that survives the removal', () => {
-    let state = build([
-      ['q1', null],
-      ['q2', 'q1'],
-    ]);
-    state = must(setPendingParent(state, 'q1', 50));
-    const after = must(removeNode(state, 'q2', { cascade: true }, 99));
-    expect(after.pendingParentId).toBe('q1');
   });
 
   it('rejects an unknown node', () => {
@@ -469,10 +424,15 @@ describe('repair', () => {
     expect(linearize(report.state)).toHaveLength(2);
   });
 
-  it('clears a pending choice that points at a missing node', () => {
+  it('ignores the pending parent that an older stored tree held', () => {
     const sound = build([['q1', null]]);
-    const broken: TreeState = { ...sound, pendingParentId: 'gone' };
-    expect(repair(broken, 99).state.pendingParentId).toBeNull();
+    // An older tree held the parent the user chose for a question not yet
+    // asked. That mode is gone. The field must not come back as a node.
+    const stored = JSON.parse(serialize(sound)) as Record<string, unknown>;
+    const raw = JSON.stringify({ ...stored, pendingParentId: 'gone' });
+    const report = must(deserialize(raw, 99));
+    expect(Object.keys(report.state.nodes)).toEqual(['q1']);
+    expect('pendingParentId' in report.state).toBe(false);
   });
 });
 

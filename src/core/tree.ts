@@ -50,11 +50,6 @@ export interface TreeState {
   /** The claude.ai conversation uuid that owns this tree. */
   readonly conversationId: string;
   readonly nodes: Readonly<Record<string, TreeNode>>;
-  /**
-   * The node you selected as the parent of your next question.
-   * `null` means the next question attaches to the newest node.
-   */
-  readonly pendingParentId: string | null;
   readonly updatedAt: number;
 }
 
@@ -100,7 +95,6 @@ export function createTree(conversationId: string, now: number): TreeState {
     version: TREE_VERSION,
     conversationId,
     nodes: {},
-    pendingParentId: null,
     updatedAt: now,
   };
 }
@@ -173,31 +167,6 @@ export function getChildren(state: TreeState, parentId: string | null): TreeNode
 
 export function getRoots(state: TreeState): TreeNode[] {
   return getChildren(state, null);
-}
-
-/** The newest node by creation time. This is the default parent. */
-export function lastAddedNode(state: TreeState): TreeNode | null {
-  let best: TreeNode | null = null;
-  for (const node of Object.values(state.nodes)) {
-    if (best === null) {
-      best = node;
-      continue;
-    }
-    if (node.createdAt > best.createdAt) best = node;
-    else if (node.createdAt === best.createdAt && node.id > best.id) best = node;
-  }
-  return best;
-}
-
-/**
- * The parent that a new question gets when you do not choose one.
- * It is the pending parent if you set one, otherwise the newest node.
- */
-export function effectiveParentId(state: TreeState): string | null {
-  const pending = state.pendingParentId;
-  if (pending !== null && state.nodes[pending] !== undefined) return pending;
-  const last = lastAddedNode(state);
-  return last === null ? null : last.id;
 }
 
 /**
@@ -353,14 +322,12 @@ export function subtreeIds(state: TreeState, id: string): string[] {
 function withNodes(
   state: TreeState,
   nodes: Record<string, TreeNode>,
-  pendingParentId: string | null,
   now: number,
 ): TreeState {
   return {
     version: TREE_VERSION,
     conversationId: state.conversationId,
     nodes,
-    pendingParentId,
     updatedAt: now,
   };
 }
@@ -392,34 +359,7 @@ export function addNode(
     order: nextOrder(state, parentId),
   };
   const nodes = { ...state.nodes, [node.id]: node };
-  // The choice is spent. The next question goes back to the default parent.
-  return ok(withNodes(state, nodes, null, now));
-}
-
-/**
- * Add a node under the parent the user chose in the tree panel.
- * It falls back to the newest node, and then to the root.
- * It clears the pending choice.
- */
-export function addNodeUsingPendingParent(
-  state: TreeState,
-  input: NewNode,
-  now: number,
-): Result<TreeState> {
-  const parentId = effectiveParentId(state);
-  // `effectiveParentId` can only name a node that exists, so this is safe.
-  return addNode(state, input, parentId === input.id ? null : parentId, now);
-}
-
-export function setPendingParent(
-  state: TreeState,
-  parentId: string | null,
-  now: number,
-): Result<TreeState> {
-  if (parentId !== null && state.nodes[parentId] === undefined) {
-    return err('NODE_NOT_FOUND', `node ${parentId} is not in the tree`);
-  }
-  return ok(withNodes(state, { ...state.nodes }, parentId, now));
+  return ok(withNodes(state, nodes, now));
 }
 
 /**
@@ -436,7 +376,7 @@ export function setPosition(
   if (node === undefined) return err('NODE_NOT_FOUND', `node ${id} is not in the tree`);
   if (node.position === position) return ok(state);
   const nodes = { ...state.nodes, [id]: { ...node, position } };
-  return ok(withNodes(state, nodes, state.pendingParentId, now));
+  return ok(withNodes(state, nodes, now));
 }
 
 export function setLabel(
@@ -448,7 +388,7 @@ export function setLabel(
   const node = state.nodes[id];
   if (node === undefined) return err('NODE_NOT_FOUND', `node ${id} is not in the tree`);
   const nodes = { ...state.nodes, [id]: { ...node, label } };
-  return ok(withNodes(state, nodes, state.pendingParentId, now));
+  return ok(withNodes(state, nodes, now));
 }
 
 /** Move a node, and its whole subtree, under a new parent. */
@@ -471,7 +411,7 @@ export function setParent(
 
   const moved: TreeNode = { ...node, parentId, order: nextOrder(state, parentId) };
   const nodes = { ...state.nodes, [id]: moved };
-  return ok(withNodes(state, nodes, state.pendingParentId, now));
+  return ok(withNodes(state, nodes, now));
 }
 
 export interface RemoveOptions {
@@ -500,9 +440,7 @@ export function removeNode(
     delete nodes[id];
   }
 
-  const pending = state.pendingParentId;
-  const stillThere = pending !== null && nodes[pending] !== undefined;
-  return ok(withNodes(state, nodes, stillThere ? pending : null, now));
+  return ok(withNodes(state, nodes, now));
 }
 
 // ------------------------------------------------------------------ repair
@@ -554,14 +492,8 @@ export function repair(state: TreeState, now: number): RepairReport {
     }
   }
 
-  let pending = state.pendingParentId;
-  if (pending !== null && nodes[pending] === undefined) {
-    fixes.push(`the pending parent ${pending} is gone; the choice is cleared`);
-    pending = null;
-  }
-
   if (fixes.length === 0) return { state, fixes };
-  return { state: withNodes(state, nodes, pending, now), fixes };
+  return { state: withNodes(state, nodes, now), fixes };
 }
 
 // ----------------------------------------------------------- persistence
@@ -621,7 +553,9 @@ export function deserialize(raw: string, now: number): Result<RepairReport> {
     version: TREE_VERSION,
     conversationId: candidate.conversationId,
     nodes,
-    pendingParentId: typeof candidate.pendingParentId === 'string' ? candidate.pendingParentId : null,
+    // An older tree held a "pendingParentId": the parent the user chose for
+    // a question not yet asked. That mode is gone, so nothing reads the
+    // field now. An old stored tree still loads, without the field.
     updatedAt: typeof candidate.updatedAt === 'number' ? candidate.updatedAt : now,
   };
 

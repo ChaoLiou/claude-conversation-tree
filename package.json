@@ -1,6 +1,6 @@
 {
   "name": "claude-chat-tree",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Browser extension that shows the dependency tree of question and answer pairs in a claude.ai conversation.",

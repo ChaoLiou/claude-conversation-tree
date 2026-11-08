@@ -7,6 +7,11 @@
  *
  * It uses no framework. The row list comes from `linearize`, which already
  * carries the indent depth and the guide lines, so a plain loop is enough.
+ *
+ * There is one way to make a link, and it runs in one direction. The button
+ * on a row always asks for that row's parent. You press `set parent...` on
+ * the child, and then you press `put it here` on the parent. The panel never
+ * holds a choice for a question you have not asked yet.
  */
 
 import type { FlatRow } from '../core/tree.js';
@@ -14,11 +19,7 @@ import type { FlatRow } from '../core/tree.js';
 export interface PanelCallbacks {
   /** The user wants to see this exchange in the chat. */
   readonly onJump: (turnId: string) => void;
-  /** The user wants the next question to hang under this exchange. */
-  readonly onBranch: (turnId: string) => void;
-  /** The user gave up the choice. */
-  readonly onClearPending: () => void;
-  /** The user wants to give this exchange a parent, after the event. */
+  /** The user wants to give this exchange a parent. */
   readonly onStartLink: (turnId: string) => void;
   /** The user picked the parent for the exchange being linked. */
   readonly onPickParent: (parentId: string) => void;
@@ -26,24 +27,45 @@ export interface PanelCallbacks {
   readonly onMakeRoot: () => void;
   /** The user gave up on linking. */
   readonly onCancelLink: () => void;
-  /** The user wants to hide, or show, the exchanges that stand alone. */
-  readonly onToggleFilter: () => void;
+  /** The user chose which exchanges the list shows. */
+  readonly onSetFilter: (onlyLinked: boolean) => void;
   /** The user wants the whole conversation read into the tree. */
   readonly onLoadOlder: () => void;
+  /** The user wants the last link undone. */
+  readonly onUndo: () => void;
+  /** The user does not want the note about the new exchange. */
+  readonly onDismissNudge: () => void;
   readonly onToggle: (open: boolean) => void;
+}
+
+/** The offer to undo the link that was just made. */
+export interface UndoOffer {
+  readonly childLabel: string;
+  /** The new parent. `null` means the exchange became a root. */
+  readonly parentLabel: string | null;
+}
+
+/**
+ * A note that a new exchange joined the tree.
+ *
+ * A new exchange always stands on its own, so the panel says so once and
+ * offers the link. The note disappears by itself. It is a note, not a mode:
+ * there is no state to remember and nothing to undo if you ignore it.
+ */
+export interface Nudge {
+  readonly turnId: string;
+  readonly label: string;
 }
 
 export interface PanelView {
   readonly rows: readonly FlatRow[];
-  /** The node the next question will hang under, if the user chose one. */
-  readonly pendingParentId: string | null;
   /** The exchange the chat is looking at, for a highlight. */
   readonly activeTurnId: string | null;
   /** A short line for the user. `null` hides the strip. */
   readonly notice: string | null;
   /**
    * The exchange that is waiting for a parent, if you started a link.
-   * While this is set, every row is a target.
+   * While this is set, every other row is a target.
    */
   readonly linkingChildId: string | null;
   /** True while the panel hides the exchanges that stand alone. */
@@ -52,6 +74,8 @@ export interface PanelView {
   readonly totalCount: number;
   /** How many of them take part in a link. */
   readonly linkedCount: number;
+  readonly undo: UndoOffer | null;
+  readonly nudge: Nudge | null;
   /**
    * How much of the conversation claude.ai has drawn.
    *
@@ -132,7 +156,6 @@ const STYLE = `
   font-size: 11px;
   text-align: center;
 }
-.toggle.choosing { border-color: var(--accent); }
 
 .panel {
   position: fixed;
@@ -140,7 +163,6 @@ const STYLE = `
   display: none;
   flex-direction: column;
   background: var(--bg);
-  border: 1px solid var(--line);
   border: 1px solid var(--line);
   box-shadow: var(--shadow);
   overflow: hidden;
@@ -191,20 +213,43 @@ header .meta { font-size: 11px; color: var(--muted); }
 }
 .iconbtn:hover { background: var(--accent-soft); color: var(--accent); }
 
-.notice, .pending {
+/* Two segments, and the filled one is what the list shows now. One button
+   that changes its own word cannot say whether the word is the state or
+   the action. Two segments can. */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.seg-b {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.seg-b:hover { color: var(--accent); }
+.seg-b.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  cursor: default;
+}
+
+.notice, .nudge, .undo, .linking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 8px 14px;
   font-size: 12px;
   border-bottom: 1px solid var(--line);
 }
-.notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  line-height: 1.4;
-}
+.notice { color: var(--muted); line-height: 1.4; }
 .notice .noticetext { flex: 1; }
-.loadolder {
+.loadolder, .undobtn, .nudgelink, .nudgeoff {
   flex: 0 0 auto;
   border: 1px solid var(--line);
   background: transparent;
@@ -216,74 +261,51 @@ header .meta { font-size: 11px; color: var(--muted); }
   cursor: pointer;
   white-space: nowrap;
 }
-.loadolder:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.loadolder:hover:not(:disabled),
+.undobtn:hover,
+.nudgelink:hover,
+.nudgeoff:hover { border-color: var(--accent); color: var(--accent); }
 .loadolder:disabled { opacity: 0.5; cursor: default; }
 .loadolder[hidden] { display: none; }
+
+.nudge .tag, .undo .tag {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.nudge .label, .undo .undotext {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pick bar. It is loud on purpose: while it shows, every row in the
+   list means something different, and the user must see that at a glance. */
 .linking {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--line);
   background: var(--accent-soft);
   color: var(--accent);
-  font-size: 12px;
   font-weight: 600;
 }
 .linking .label {
   flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-weight: 400;
 }
 .linking button {
+  flex: 0 0 auto;
   border: 1px solid currentColor;
   background: transparent;
   color: inherit;
   border-radius: 6px;
   padding: 2px 8px;
   font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
-.linking[hidden] { display: none; }
-.filter {
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--muted);
-  border-radius: 999px;
-  padding: 2px 9px;
-  font: inherit;
-  font-size: 10.5px;
-  cursor: pointer;
-}
-.filter:hover { border-color: var(--accent); color: var(--accent); }
-.filter.on { border-color: var(--accent); color: var(--accent); }
-.row.target .jump { cursor: copy; }
-.row.target:hover { background: var(--accent-soft); }
-.row.linking-self { opacity: 0.45; }
-.pending {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  background: var(--accent-soft);
-  color: var(--accent);
-  font-weight: 600;
-}
-.pending .label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 400;
-}
-.pending button {
-  border: 1px solid currentColor;
-  background: transparent;
-  color: inherit;
-  border-radius: 6px;
-  padding: 2px 8px;
   font-size: 11px;
   cursor: pointer;
 }
@@ -294,7 +316,9 @@ header .meta { font-size: 11px; color: var(--muted); }
 .row { display: flex; align-items: stretch; min-height: 34px; }
 .row:hover { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .row.active { background: var(--accent-soft); }
-.row.chosen { outline: 1px solid var(--accent); outline-offset: -1px; }
+.row.target .jump { cursor: copy; }
+.row.target:hover { background: var(--accent-soft); }
+.row.linking-self { opacity: 0.45; }
 
 .g, .elbow { flex: 0 0 15px; position: relative; }
 .g.line::before, .elbow::before {
@@ -341,10 +365,13 @@ header .meta { font-size: 11px; color: var(--muted); }
 }
 .jump .kids { font-size: 10.5px; color: var(--muted); }
 
-.branch {
+/* The row action stays visible. An action that appears on hover only is an
+   action a new reader never finds, and on a touch screen there is no hover
+   at all. */
+.act {
   flex: 0 0 auto;
   align-self: center;
-  margin-right: 6px;
+  margin-right: 10px;
   padding: 3px 8px;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -353,19 +380,15 @@ header .meta { font-size: 11px; color: var(--muted); }
   font: inherit;
   font-size: 11px;
   cursor: pointer;
-  opacity: 0;
+  white-space: nowrap;
 }
-.row:hover .branch, .row.chosen .branch, .row.target .branch { opacity: 1; }
-.branch.link { margin-right: 10px; }
-.branch:hover { border-color: var(--accent); color: var(--accent); }
-@media (max-width: 859px) {
-  .branch { opacity: 1; }
-}
+.act:hover { border-color: var(--accent); color: var(--accent); }
+.act.pick { border-color: var(--accent); color: var(--accent); }
 
 /* The rules above set display on these strips, which beats the browser's
    own rule for the hidden attribute. State it again, last, or a cancelled
    choice keeps showing its strip. */
-.notice[hidden], .pending[hidden], .linking[hidden] { display: none; }
+.notice[hidden], .nudge[hidden], .undo[hidden], .linking[hidden] { display: none; }
 `;
 
 /** One line that says the tree may not hold the whole conversation yet. */
@@ -386,9 +409,12 @@ export class TreePanel {
   #list: HTMLElement | null = null;
   #meta: HTMLElement | null = null;
   #notice: HTMLElement | null = null;
-  #pending: HTMLElement | null = null;
+  #nudge: HTMLElement | null = null;
+  #undo: HTMLElement | null = null;
   #linking: HTMLElement | null = null;
-  #filter: HTMLButtonElement | null = null;
+  #segAll: HTMLButtonElement | null = null;
+  #segOnly: HTMLButtonElement | null = null;
+  #onKeyDown: ((event: KeyboardEvent) => void) | null = null;
   #open = false;
   #lastView: PanelView | null = null;
 
@@ -427,33 +453,59 @@ export class TreePanel {
         <h2>CONVERSATION TREE</h2>
         <span class="spacer"></span>
         <span class="meta"></span>
-        <button class="filter" type="button" title="hide the exchanges that stand alone">all</button>
+        <span class="seg">
+          <button class="seg-b all" type="button" title="show every exchange">all</button>
+          <button class="seg-b only" type="button" title="show only the exchanges you tied together">linked</button>
+        </span>
         <button class="iconbtn close" type="button" title="close">&times;</button>
       </header>
-      <div class="pending" hidden>
-        <span>next question goes under:</span>
-        <span class="label"></span>
-        <button type="button" class="cancel">cancel</button>
-      </div>
       <div class="linking" hidden>
         <span>pick the parent of:</span>
         <span class="label"></span>
         <button type="button" class="makeroot">no parent</button>
         <button type="button" class="cancellink">cancel</button>
       </div>
+      <div class="nudge" hidden>
+        <span class="tag">new</span>
+        <span class="label"></span>
+        <button type="button" class="nudgelink">set parent&hellip;</button>
+        <button type="button" class="nudgeoff" title="leave it on its own">dismiss</button>
+      </div>
+      <div class="undo" hidden>
+        <span class="undotext"></span>
+        <button type="button" class="undobtn">undo</button>
+      </div>
       <div class="notice" hidden>
         <span class="noticetext"></span>
-        <button type="button" class="loadolder">build full tree</button>
+        <button type="button" class="loadolder">load older</button>
       </div>
       <div class="list"></div>`;
     root.appendChild(panel);
 
     panel.querySelector('.close')?.addEventListener('click', () => this.setOpen(false));
-    panel.querySelector('.cancel')?.addEventListener('click', () => this.#callbacks.onClearPending());
     panel.querySelector('.loadolder')?.addEventListener('click', () => this.#callbacks.onLoadOlder());
-    panel.querySelector('.filter')?.addEventListener('click', () => this.#callbacks.onToggleFilter());
+    panel.querySelector('.all')?.addEventListener('click', () => this.#callbacks.onSetFilter(false));
+    panel.querySelector('.only')?.addEventListener('click', () => this.#callbacks.onSetFilter(true));
     panel.querySelector('.makeroot')?.addEventListener('click', () => this.#callbacks.onMakeRoot());
     panel.querySelector('.cancellink')?.addEventListener('click', () => this.#callbacks.onCancelLink());
+    panel.querySelector('.undobtn')?.addEventListener('click', () => this.#callbacks.onUndo());
+    panel.querySelector('.nudgeoff')?.addEventListener('click', () => this.#callbacks.onDismissNudge());
+    panel.querySelector('.nudgelink')?.addEventListener('click', () => {
+      const id = this.#lastView?.nudge?.turnId ?? null;
+      if (id !== null) this.#callbacks.onStartLink(id);
+    });
+
+    // Escape leaves the pick state. The page uses Escape for its own ends,
+    // so take the key only while the pick state is really open.
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return;
+      if (this.#lastView?.linkingChildId == null) return;
+      event.stopPropagation();
+      event.preventDefault();
+      this.#callbacks.onCancelLink();
+    };
+    document.addEventListener('keydown', onKeyDown, true);
+    this.#onKeyDown = onKeyDown;
 
     this.#host = host;
     this.#root = root;
@@ -462,15 +514,21 @@ export class TreePanel {
     this.#list = panel.querySelector<HTMLElement>('.list');
     this.#meta = panel.querySelector<HTMLElement>('.meta');
     this.#notice = panel.querySelector<HTMLElement>('.notice');
-    this.#pending = panel.querySelector<HTMLElement>('.pending');
+    this.#nudge = panel.querySelector<HTMLElement>('.nudge');
+    this.#undo = panel.querySelector<HTMLElement>('.undo');
     this.#linking = panel.querySelector<HTMLElement>('.linking');
-    this.#filter = panel.querySelector<HTMLButtonElement>('.filter');
+    this.#segAll = panel.querySelector<HTMLButtonElement>('.seg-b.all');
+    this.#segOnly = panel.querySelector<HTMLButtonElement>('.seg-b.only');
 
     parent.appendChild(host);
     if (this.#lastView !== null) this.render(this.#lastView);
   }
 
   unmount(): void {
+    if (this.#onKeyDown !== null) {
+      document.removeEventListener('keydown', this.#onKeyDown, true);
+      this.#onKeyDown = null;
+    }
     this.#host?.remove();
     this.#host = null;
     this.#root = null;
@@ -482,6 +540,9 @@ export class TreePanel {
   setOpen(open: boolean): void {
     this.#open = open;
     this.#panel?.classList.toggle('open', open);
+    // A pick state that you cannot see is a pick state you forget. Closing
+    // the panel gives it up.
+    if (!open && this.#lastView?.linkingChildId != null) this.#callbacks.onCancelLink();
     this.#callbacks.onToggle(open);
   }
 
@@ -492,9 +553,6 @@ export class TreePanel {
     const count = view.rows.length;
     const countEl = this.#toggle?.querySelector('.count');
     if (countEl !== null && countEl !== undefined) countEl.textContent = String(count);
-    // A different name from the strip's class, so a reader of the shadow
-    // root cannot confuse the two.
-    this.#toggle?.classList.toggle('choosing', view.pendingParentId !== null);
 
     if (this.#meta !== null) {
       this.#meta.textContent = view.onlyLinked
@@ -502,19 +560,38 @@ export class TreePanel {
         : (view.totalCount === 1 ? '1 exchange' : `${view.totalCount} exchanges`);
     }
 
-    if (this.#filter !== null) {
-      this.#filter.textContent = view.onlyLinked ? 'linked' : 'all';
-      this.#filter.classList.toggle('on', view.onlyLinked);
-      this.#filter.title = view.onlyLinked
-        ? 'showing only the exchanges you tied together'
-        : 'hide the exchanges that stand alone';
-    }
+    this.#segAll?.classList.toggle('on', !view.onlyLinked);
+    this.#segOnly?.classList.toggle('on', view.onlyLinked);
+
+    const linking = view.linkingChildId !== null;
 
     if (this.#linking !== null) {
       const child = view.rows.find((r) => r.node.id === view.linkingChildId) ?? null;
-      this.#linking.hidden = view.linkingChildId === null;
+      this.#linking.hidden = !linking;
       const label = this.#linking.querySelector('.label');
       if (label !== null) label.textContent = child?.node.label ?? '';
+    }
+
+    // The pick bar owns the panel while it is open. A second strip under it
+    // would offer an action that the pick state cannot carry out.
+    if (this.#nudge !== null) {
+      const nudge = linking ? null : view.nudge;
+      this.#nudge.hidden = nudge === null;
+      const label = this.#nudge.querySelector('.label');
+      if (label !== null) label.textContent = nudge?.label ?? '';
+    }
+
+    if (this.#undo !== null) {
+      const undo = linking ? null : view.undo;
+      this.#undo.hidden = undo === null;
+      const text = this.#undo.querySelector('.undotext');
+      if (text !== null && undo !== null) {
+        // Name the parent only. Both labels in one line overflow the strip,
+        // and the child is the row you just acted on.
+        text.textContent = undo.parentLabel === null
+          ? `${undo.childLabel}: no parent now`
+          : `now under ${undo.parentLabel}`;
+      }
     }
 
     const line = view.notice ?? describeCoverage(view.coverage);
@@ -530,22 +607,15 @@ export class TreePanel {
       }
     }
 
-    if (this.#pending !== null) {
-      const chosen = view.rows.find((r) => r.node.id === view.pendingParentId) ?? null;
-      this.#pending.hidden = chosen === null;
-      const label = this.#pending.querySelector('.label');
-      if (label !== null) label.textContent = chosen?.node.label ?? '';
-    }
-
     this.#list.replaceChildren();
     if (count === 0) {
       const empty = document.createElement('div');
       empty.className = 'empty';
       empty.textContent = view.onlyLinked
         ? 'Nothing is tied together yet. Press "all" above to see every '
-          + 'exchange, then use "link" on one to give it a parent.'
+          + 'exchange. Then press "set parent" on one of them.'
         : 'No exchange yet. Ask something in the chat, and it appears here. '
-          + 'Then press "under" on a row, and your next question hangs there.';
+          + 'Every exchange stands on its own until you press "set parent".';
       this.#list.appendChild(empty);
       return;
     }
@@ -567,7 +637,6 @@ export class TreePanel {
     element.dataset.root = row.node.parentId === null ? 'true' : 'false';
     element.dataset.children = String(row.childCount);
     if (row.node.id === view.activeTurnId) element.classList.add('active');
-    if (row.node.id === view.pendingParentId) element.classList.add('chosen');
 
     // A row at indent I needs exactly I columns. The first I-1 columns are
     // a line or a blank, one per branch above it. The last column holds the
@@ -616,17 +685,16 @@ export class TreePanel {
     });
     element.appendChild(jump);
 
-    const linking = view.linkingChildId !== null;
     const isSelf = row.node.id === view.linkingChildId;
 
-    if (linking) {
+    if (view.linkingChildId !== null) {
       element.classList.add(isSelf ? 'linking-self' : 'target');
       if (!isSelf) {
         const pick = document.createElement('button');
-        pick.className = 'branch';
+        pick.className = 'act pick';
         pick.type = 'button';
-        pick.textContent = 'set as parent';
-        pick.title = 'the exchange being linked hangs under this one';
+        pick.textContent = 'put it here';
+        pick.title = 'the exchange in the bar above hangs under this one';
         pick.addEventListener('click', (event) => {
           event.stopPropagation();
           this.#callbacks.onPickParent(row.node.id);
@@ -636,29 +704,21 @@ export class TreePanel {
       return element;
     }
 
-    const branch = document.createElement('button');
-    branch.className = 'branch';
-    branch.type = 'button';
-    branch.textContent = row.node.id === view.pendingParentId ? 'chosen' : 'under';
-    branch.title = 'the next question you ask hangs under this exchange';
-    branch.addEventListener('click', (event) => {
-      event.stopPropagation();
-      this.#callbacks.onBranch(row.node.id);
-    });
-    element.appendChild(branch);
-
-    const link = document.createElement('button');
-    link.className = 'branch link';
-    link.type = 'button';
-    link.textContent = row.node.parentId === null ? 'link' : 'relink';
-    link.title = row.node.parentId === null
-      ? 'give this exchange a parent now'
-      : 'move this exchange under another one';
-    link.addEventListener('click', (event) => {
+    // One action, one direction: this row asks for its own parent. The
+    // older panel had a second button that ran the other way, and the two
+    // looked alike, so the direction was a guess.
+    const setParent = document.createElement('button');
+    setParent.className = 'act setparent';
+    setParent.type = 'button';
+    setParent.textContent = 'set parent…';
+    setParent.title = row.node.parentId === null
+      ? 'choose the exchange that this one hangs under'
+      : 'choose another exchange for this one to hang under';
+    setParent.addEventListener('click', (event) => {
       event.stopPropagation();
       this.#callbacks.onStartLink(row.node.id);
     });
-    element.appendChild(link);
+    element.appendChild(setParent);
 
     return element;
   }

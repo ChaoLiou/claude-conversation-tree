@@ -38,13 +38,27 @@ import {
   isLinked,
   linearize,
   setParent,
-  setPendingParent,
   type TreeState,
 } from './core/tree.js';
-import { TreePanel, type Coverage, type PanelView } from './ui/panel.js';
+import {
+  TreePanel,
+  type Coverage,
+  type Nudge,
+  type PanelView,
+  type UndoOffer,
+} from './ui/panel.js';
 
 const FLASH_CLASS = 'claude-tree-flash';
 const LOG_PREFIX = '[claude-tree]';
+
+/**
+ * How long the panel offers an undo, or notes a new exchange.
+ *
+ * Both strips go by themselves. Neither one is a mode: if you ignore the
+ * note, the new exchange simply stands on its own, which is what it already
+ * does.
+ */
+const STRIP_MS = 10_000;
 
 interface MaybeExtensionGlobal {
   readonly storage?: { readonly local?: ExtensionStorageArea };
@@ -131,6 +145,19 @@ class Session {
   #linkingChildId: string | null = null;
   /** True while the panel hides the exchanges that stand alone. */
   #onlyLinked = false;
+  /**
+   * The last link, and the tree as it stood before that link.
+   *
+   * One link, not a stack. A deeper history would have to survive a reload
+   * and a change of conversation, and it would then have to say which tree
+   * each step belongs to. One step covers the mistake that actually
+   * happens, which is the link you just made.
+   */
+  #undo: { readonly before: TreeState; readonly offer: UndoOffer } | null = null;
+  /** The note about the newest exchange, while it shows. */
+  #nudge: Nudge | null = null;
+  /** The timer that takes the undo strip and the note away. */
+  #stripTimer: ReturnType<typeof setTimeout> | null = null;
 
   private constructor(
     conversationId: string,
@@ -194,12 +221,62 @@ class Session {
       this.#state = result.state;
       this.#store.saveSoon(this.#state);
     }
+    this.#noteNewExchange(result.added);
     this.draw();
   }
 
   draw(): void {
     this.#markBusy();
     this.#panel.render(this.#viewNow());
+  }
+
+  /**
+   * Offer the link for the exchange that just arrived.
+   *
+   * A new exchange always stands on its own, because only the user makes a
+   * link. The note says so once, and it puts the one action next to the
+   * words. It needs a second exchange to hang under, and it needs an open
+   * panel: a note nobody can see is only a timer.
+   */
+  #noteNewExchange(added: readonly string[]): void {
+    if (added.length === 0) return;
+    if (!this.#panel.open) return;
+    if (this.#linkingChildId !== null) return;
+    const id = added[added.length - 1];
+    if (id === undefined) return;
+    const node = getNode(this.#state, id);
+    if (node === null) return;
+    if (Object.keys(this.#state.nodes).length < 2) return;
+    this.#showStrip(() => {
+      this.#nudge = { turnId: id, label: node.label };
+      this.#undo = null;
+    });
+  }
+
+  /**
+   * Put one strip up, and take it down again after `STRIP_MS`.
+   *
+   * The undo strip and the note share the slot. Two strips at once would
+   * stack two offers over the list, and the lower one would move under the
+   * pointer as the upper one went away.
+   */
+  #showStrip(set: () => void): void {
+    if (this.#stripTimer !== null) clearTimeout(this.#stripTimer);
+    set();
+    this.#stripTimer = setTimeout(() => {
+      this.#stripTimer = null;
+      this.#undo = null;
+      this.#nudge = null;
+      this.draw();
+    }, STRIP_MS);
+  }
+
+  /** Take both strips down now, without waiting for the timer. */
+  #clearStrips(): void {
+    if (this.#stripTimer !== null) clearTimeout(this.#stripTimer);
+    this.#stripTimer = null;
+    this.#undo = null;
+    this.#nudge = null;
   }
 
   /**
@@ -232,7 +309,8 @@ class Session {
     const linkedCount = all.filter((row) => isLinked(this.#state, row.node.id)).length;
     return {
       rows: this.#onlyLinked ? linearize(this.#state, { onlyLinked: true }) : all,
-      pendingParentId: this.#state.pendingParentId,
+      undo: this.#undo?.offer ?? null,
+      nudge: this.#nudge,
       activeTurnId: this.#stale ? null : visibleTurnId(),
       notice: this.#stale ? 'waiting for this conversation to load ...' : this.#notice,
       coverage: this.#stale ? null : coverage,
@@ -250,6 +328,7 @@ class Session {
     if (getNode(this.#state, turnId) === null) return;
     this.#linkingChildId = turnId;
     this.#notice = null;
+    this.#clearStrips();
     this.draw();
   }
 
@@ -273,7 +352,8 @@ class Session {
   }
 
   #applyLink(childId: string, parentId: string | null): void {
-    const result = setParent(this.#state, childId, parentId, Date.now());
+    const before = this.#state;
+    const result = setParent(before, childId, parentId, Date.now());
     this.#linkingChildId = null;
     if (!result.ok) {
       this.#notice = result.error.code === 'WOULD_CREATE_CYCLE'
@@ -282,39 +362,43 @@ class Session {
       this.draw();
       return;
     }
+    const child = getNode(result.value, childId);
+    const parent = parentId === null ? null : getNode(result.value, parentId);
     this.#state = result.value;
     this.#notice = null;
     this.#store.saveSoon(this.#state);
+    this.#showStrip(() => {
+      this.#nudge = null;
+      this.#undo = {
+        before,
+        offer: {
+          childLabel: child?.label ?? '',
+          parentLabel: parent === null ? null : parent.label,
+        },
+      };
+    });
     this.draw();
   }
 
-  toggleFilter(): void {
-    this.#onlyLinked = !this.#onlyLinked;
-    this.draw();
-  }
-
-  choose(turnId: string): void {
-    this.#linkingChildId = null;
-    const next = turnId === this.#state.pendingParentId
-      ? setPendingParent(this.#state, null, Date.now())
-      : setPendingParent(this.#state, turnId, Date.now());
-    if (!next.ok) {
-      console.warn(LOG_PREFIX, 'could not choose that node:', next.error);
-      this.#notice = `could not choose that node: ${next.error.code}`;
-      this.draw();
-      return;
-    }
-    this.#state = next.value;
+  /** Put the tree back as it stood before the last link. */
+  undoLink(): void {
+    const step = this.#undo;
+    if (step === null) return;
+    this.#clearStrips();
+    this.#state = step.before;
     this.#notice = null;
     this.#store.saveSoon(this.#state);
     this.draw();
   }
 
-  clearChoice(): void {
-    const next = setPendingParent(this.#state, null, Date.now());
-    if (!next.ok) return;
-    this.#state = next.value;
-    this.#store.saveSoon(this.#state);
+  dismissStrips(): void {
+    this.#clearStrips();
+    this.draw();
+  }
+
+  setFilter(onlyLinked: boolean): void {
+    if (this.#onlyLinked === onlyLinked) return;
+    this.#onlyLinked = onlyLinked;
     this.draw();
   }
 
@@ -438,6 +522,9 @@ class Session {
     this.#move = null;
     this.#jumping = false;
     this.#sweeping = false;
+    // An undo that points at a tree we have left must not reach the next
+    // conversation's panel.
+    this.#clearStrips();
     document.documentElement.removeAttribute('data-claude-tree-busy');
     this.#stopWatching?.();
     this.#stopWatching = null;
@@ -454,14 +541,14 @@ async function boot(): Promise<void> {
 
   const panel = new TreePanel({
     onJump: (turnId) => { void session?.jump(turnId); },
-    onBranch: (turnId) => { session?.choose(turnId); },
-    onClearPending: () => { session?.clearChoice(); },
     onStartLink: (turnId) => { session?.startLink(turnId); },
     onPickParent: (parentId) => { session?.pickParent(parentId); },
     onMakeRoot: () => { session?.makeRoot(); },
     onCancelLink: () => { session?.cancelLink(); },
-    onToggleFilter: () => { session?.toggleFilter(); },
+    onSetFilter: (onlyLinked) => { session?.setFilter(onlyLinked); },
     onLoadOlder: () => { void session?.buildFullTree(); },
+    onUndo: () => { session?.undoLink(); },
+    onDismissNudge: () => { session?.dismissStrips(); },
     onToggle: (open) => { if (open) session?.refresh(); },
   });
   panel.mount(document.body);
@@ -475,8 +562,9 @@ async function boot(): Promise<void> {
     }
     if (id === null) {
       panel.render({
-        rows: [], pendingParentId: null, activeTurnId: null, notice: null, coverage: null,
+        rows: [], activeTurnId: null, notice: null, coverage: null,
         linkingChildId: null, onlyLinked: false, totalCount: 0, linkedCount: 0,
+        undo: null, nudge: null,
       });
       return;
     }

@@ -1,8 +1,8 @@
 # Claude Conversation Tree
 
 A browser extension for claude.ai. It shows the questions and answers of one
-conversation as a tree, and it lets you choose which exchange your next
-question hangs under.
+conversation as a tree, and it lets you say which exchange each question
+depends on.
 
 claude.ai shows a conversation as one straight line. Often it is not one.
 You read an answer, three separate questions come to mind, and all three
@@ -22,14 +22,21 @@ claude.ai gives each exchange a stable id in the page, in the attribute
 **Only you make a link. The extension never works one out for itself.**
 
 A conversation with no links is a list of separate exchanges, each a tree of
-one node. A link appears when you ask for it, in one of two ways:
+one node. You make a link after the event, in two presses:
 
-- **under** — press it on a row, then ask your next question in the chat.
-  That question hangs under the row you pressed.
-- **link** — press it on a row, then pick the parent. This works after the
-  event, for a question you already asked.
+1. Press **set parent...** on the exchange that depends on another one.
+2. Press **put it here** on the exchange it depends on.
 
 Nothing else creates, moves or removes a link.
+
+The order of those two presses is the whole interface. The button sits on
+the **child**, and it asks for that child's parent. It runs one way only.
+
+An earlier panel had a second button beside it, which named the parent and
+then waited for a question you had not asked yet. The two buttons looked
+alike and ran in opposite directions, so only a reader who already knew the
+difference could use the panel. That button is gone. You ask the question
+first, you read the reply, and then you say what it hangs under.
 
 That rule is not a simplification; it is the design. An earlier version read
 the order of the rows and worked out which exchange followed which. Every
@@ -44,15 +51,53 @@ A guess made from such a page is wrong often enough that links moved about
 on their own while you scrolled. Removing the guess removed the whole class
 of fault, and about a third of the code with it.
 
+## What the panel looks like
+
+```
++- CONVERSATION TREE        4 exchanges  [all|linked]  x -+
+| NEW  what about Firefox?       [set parent...] [dismiss]|
++---------------------------------------------------------+
+| why use a shadow root at all?                           |
+|   2 follow-ups                            [set parent...]
+| |- does the page CSS leak in?             [set parent...]
+| |- how do I test the manifest?            [set parent...]
+| what about Firefox?                       [set parent...]
++---------------------------------------------------------+
+```
+
+One press of **set parent...** turns the list into a set of targets:
+
+```
++- CONVERSATION TREE                                   x -+
+| pick the parent of: what about Firefox?               |
+|                            [no parent] [cancel]         |
++---------------------------------------------------------+
+| why use a shadow root at all?               [put it here]
+| |- does the page CSS leak in?               [put it here]
+| |- how do I test the manifest?              [put it here]
+| what about Firefox?   <- grey, and not a target          |
++---------------------------------------------------------+
+```
+
+`Escape` leaves that state, and so does closing the panel.
+
 ## What it does
 
 - List every exchange, so you can tie any of them together later.
 - Draw the trees you build, and indent only where one really splits.
-- Hide the exchanges that stand alone, when you press **linked**.
+- Show every exchange, or only the linked ones: press **all** or **linked**.
+  The filled segment is what the list shows now.
 - Jump the chat to an exchange when you click its row.
-- Pull in a whole long conversation with **build full tree**, so every
-  exchange is listed.
+- Pull in a whole long conversation with **load older**, so every exchange
+  is listed.
+- Note each new exchange once, and offer the link for it. Ignore the note,
+  and that exchange stands on its own, which it already does.
+- Offer **undo** for ten seconds after each link.
 - Keep one tree per conversation, in the browser's own storage.
+
+The panel holds no choice between two questions. Every state in it is on
+the screen now, or it is gone: the pick bar, the note and the undo all end
+by themselves, and closing the panel gives up the pick bar.
 
 ## What it does not do
 
@@ -242,7 +287,7 @@ the order look odd for a moment and can break nothing.
 
 It keeps the rows at each end and drops the middle, for example `0..3` and
 then `31..33`, with nothing between. An exchange is added to the tree only
-while its row is drawn, which is why **build full tree** exists.
+while its row is drawn, which is why **load older** exists.
 
 **4. A read can catch the page halfway through a change.**
 

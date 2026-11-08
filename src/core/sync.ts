@@ -4,8 +4,8 @@
  * This module is pure. It takes the exchanges the adapter read and the tree
  * that storage held, and it returns the next tree.
  *
- * It does one thing with links: it gives a new exchange the parent you
- * chose, when you chose one. It never works a link out for itself.
+ * It does nothing at all with links. A new exchange stands on its own. You
+ * give it a parent in the panel, after you read the reply.
  *
  * That rule is the whole design. An earlier version read the order of the
  * rows and guessed which exchange followed which. Every fault in this
@@ -19,10 +19,8 @@
  *
  *   1. List every exchange it sees, so you can tie any of them up later.
  *      An exchange with no link is a tree of one node.
- *   2. Give the first new exchange the parent you chose in the panel, and
- *      then spend that choice.
- *   3. Fill in a label that the page had not rendered yet.
- *   4. Record where the page last drew each exchange, to sort the list.
+ *   2. Fill in a label that the page had not rendered yet.
+ *   3. Record where the page last drew each exchange, to sort the list.
  *      That number sorts, and does nothing else.
  */
 
@@ -73,13 +71,6 @@ export function syncWithTranscript(
   const relabelled: string[] = [];
   const problems: string[] = [];
 
-  // The parent you chose applies to the first new exchange only.
-  let pending: string | null = next.pendingParentId;
-  if (pending !== null && getNode(next, pending) === null) {
-    problems.push(`the chosen parent ${pending} is no longer in the tree; it was ignored`);
-    pending = null;
-  }
-
   for (const exchange of exchanges) {
     const position = exchange.index ?? null;
     const existing = getNode(next, exchange.turnId);
@@ -105,12 +96,8 @@ export function syncWithTranscript(
       continue;
     }
 
-    // A new exchange. It takes the parent you chose, or it stands alone.
-    let parentId: string | null = null;
-    if (pending !== null && pending !== exchange.turnId) {
-      parentId = pending;
-      pending = null;
-    }
+    // A new exchange always stands on its own. Only the user makes a link.
+    const parentId: string | null = null;
 
     const label = exchange.questionText === '' ? EMPTY_LABEL : deriveLabel(exchange.questionText);
     const result = addNode(next, { id: exchange.turnId, label, position }, parentId, now);
@@ -120,12 +107,6 @@ export function syncWithTranscript(
     } else {
       problems.push(`could not add ${exchange.turnId}: ${result.error.code}`);
     }
-  }
-
-  // `addNode` spends the choice. If nothing new arrived, keep it, so the
-  // choice survives until you really ask the next question.
-  if (added.length === 0 && pending !== null && pending !== next.pendingParentId) {
-    next = { ...next, pendingParentId: pending };
   }
 
   return { state: next, added, relabelled, problems };

@@ -24,7 +24,7 @@ const VERSION = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).ver
 const NAME = 'Claude Conversation Tree';
 const DESCRIPTION =
   'Show the dependency tree of the questions and answers in a claude.ai conversation, '
-  + 'and choose which exchange your next question hangs under.';
+  + 'and say which exchange each question depends on.';
 
 const args = process.argv.slice(2);
 const watch = args.includes('--watch');
