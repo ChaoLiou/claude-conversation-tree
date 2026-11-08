@@ -1,0 +1,30 @@
+{
+  "name": "claude-chat-tree",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser extension that shows the dependency tree of question and answer pairs in a claude.ai conversation.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "dev:chrome": "tools/dev-chrome.sh",
+    "dev:chrome:stop": "tools/dev-chrome.sh --stop",
+    "probe": "node tools/probe-run.mjs",
+    "probe:net": "node tools/probe-net.mjs",
+    "probe:keys": "node tools/probe-keys.mjs",
+    "build": "node tools/build.mjs",
+    "build:watch": "node tools/build.mjs --watch",
+    "verify": "node tools/verify.mjs",
+    "dev:ext": "tools/dev-extension.sh",
+    "inject": "node tools/inject.mjs",
+    "check:tools": "node tools/check-syntax.mjs",
+    "verify:long": "node tools/verify-nav.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "happy-dom": "^21.0.4",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}

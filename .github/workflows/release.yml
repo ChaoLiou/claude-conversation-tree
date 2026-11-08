@@ -1,0 +1,100 @@
+# Build the extension and attach the two zip files to a GitHub release.
+#
+# To publish a new version:
+#   1. Change "version" in package.json.
+#   2. Commit the change.
+#   3. git tag v<the same version>
+#   4. git push origin main --tags
+#
+# The tag starts this workflow. The workflow refuses the tag if it does not
+# agree with package.json.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Read the version
+        id: version
+        run: echo "value=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Compare the tag with package.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="${{ steps.version.outputs.value }}"
+          if [ "$tag" != "$pkg" ]; then
+            echo "The tag says $tag. package.json says $pkg. Make them agree." >&2
+            exit 1
+          fi
+
+      - name: Check the types
+        run: pnpm typecheck
+
+      - name: Run the tests
+        run: pnpm test
+
+      - name: Build both targets
+        run: pnpm build
+
+      - name: Make the zip files
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          mkdir -p artifacts
+          # Zip from inside each folder. manifest.json must sit at the top
+          # level of the zip, or the browser does not accept the folder.
+          (cd dist/chrome && zip -r -X "../../artifacts/claude-conversation-tree-chrome-v${version}.zip" .)
+          (cd dist/firefox && zip -r -X "../../artifacts/claude-conversation-tree-firefox-v${version}.zip" .)
+          ls -l artifacts
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', steps.version.outputs.value) }}
+          name: v${{ steps.version.outputs.value }}
+          generate_release_notes: true
+          files: artifacts/*.zip
+          body: |
+            ## Install on Chrome or Edge
+
+            1. Download `claude-conversation-tree-chrome-v${{ steps.version.outputs.value }}.zip`.
+            2. Unzip it into a folder that you keep. Do not delete this folder.
+            3. Open `chrome://extensions`.
+            4. Turn on **Developer mode**.
+            5. Press **Load unpacked**.
+            6. Choose the folder from step 2.
+            7. Open a conversation on claude.ai.
+
+            ## Install on Firefox
+
+            1. Download `claude-conversation-tree-firefox-v${{ steps.version.outputs.value }}.zip`.
+            2. Unzip it into a folder.
+            3. Open `about:debugging#/runtime/this-firefox`.
+            4. Press **Load Temporary Add-on**.
+            5. Choose `manifest.json` in the folder from step 2.
+
+            Firefox removes a temporary add-on when it closes. Load it again
+            after each restart.

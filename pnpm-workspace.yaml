@@ -1,0 +1,7 @@
+# pnpm 10 and later read these settings here, not from package.json.
+# esbuild needs its install script to run, or its binary is missing.
+allowBuilds:
+  esbuild: true
+onlyBuiltDependencies:
+  - esbuild
+verifyDepsBeforeRun: false
